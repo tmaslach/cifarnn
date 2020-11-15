@@ -9,21 +9,6 @@ import torch
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 
-class ValueAverager:
-    """For accumulating and then calculating the average value"""
-    def __init__ (self, value):
-        self.accum_value = 0
-        self.num_values = 0
-
-    def add(self, value):
-        self.accum_value += value
-        self.num_values += 1
-
-    @property
-    def average(self):
-        return self.accum_value / self.num_values
-
-
 class TenserBoardReport:
     max_num_incorrect_images = 56
 
@@ -31,20 +16,19 @@ class TenserBoardReport:
         loss = 0
         accuracy = 0
 
-    def __init__ (self, label_names, report_every=50, enabled=True):
-        self.writer = SummaryWriter() if enabled else None
+    def __init__ (self, label_names, disable=False):
+        self.writer = SummaryWriter() if not disable else None
         self.label_names = label_names
-        self.report_every = report_every
-        self.is_printable_step = False
         self.incorrect_test_images = None
 
-    def is_print_step(self):
-        return self.is_printable_step
-        
+    def printable_step (self, print_every):
+        """Returns true if training step is divisible by print_every or last batch
+           step of epoch"""
+        return self.training_steps % print_every == 0 or self.last_train_batch
+
     def track_epochs (self, epoch_range):
         run_start = time.time()
         self.training_steps = 0
-        self.is_printable_step = False
 
         for epoch in epoch_range:
             self.epoch = epoch
@@ -58,29 +42,31 @@ class TenserBoardReport:
 
             if self.writer:
                 self.writer.add_scalar ("Epoch Durations", duration, epoch)
-            epoch_loss = self.epoch_stats.loss / steps
-            epoch_accuracy = self.epoch_stats.accuracy / steps * 100
-            
-            print(f"Epoch {epoch}: Complete (trainAcc = {epoch_accuracy:.2f}%,",
-                                          f"trainLoss = {epoch_loss:.3f},",
-                                          f"testAccuracy = {self.last_test_accuracy:.2f}%,",
-                                          f"testLoss = {self.last_test_loss:.3f},",
-                                          f"duration = {duration:.2f}s)")
+                epoch_loss = self.epoch_stats.loss / steps
+                epoch_accuracy = self.epoch_stats.accuracy / steps * 100
+                
+                print(f"Epoch {epoch}: Complete (trainAcc = {epoch_accuracy:.2f}%,",
+                                            f"trainLoss = {epoch_loss:.3f},",
+                                            f"testAccuracy = {self.last_test_accuracy:.2f}%,",
+                                            f"testLoss = {self.last_test_loss:.3f},",
+                                            f"duration = {duration:.2f}s)")
 
         print ("Time Taken:", time.time() - run_start)
 
     def track_train_batches (self, batches):
+        self.cur_train_loss = None
+        self.cur_train_accuracy = None
+
         for batch_step, batch in enumerate(tqdm(batches, desc = f"Epoch {self.epoch}", leave=False), start=1):
             self.training_steps += 1
-            if self.writer:
-                self.is_printable_step = self.training_steps % self.report_every == 0 or batch_step == len(batches)
-            else:
-                self.is_printable_step = batch_step == len(batches)
+            self.last_train_batch = batch_step == len(batches)
             yield batch
 
-            if self.is_printable_step and self.writer:
-                self.writer.add_scalar("Loss/train", float(self.cur_train_loss), self.training_steps)
-                self.writer.add_scalar("Acc/train", self.cur_train_accuracy*100, self.training_steps)
+            if self.writer:
+                if self.cur_train_loss is not None:
+                    self.writer.add_scalar("Loss/train", float(self.cur_train_loss), self.training_steps)
+                if self.cur_train_accuracy is not None:
+                    self.writer.add_scalar("Acc/train", self.cur_train_accuracy*100, self.training_steps)
 
     def set_batch_train_loss(self, loss):
         self.cur_train_loss = loss
@@ -114,20 +100,16 @@ class TenserBoardReport:
                 self._add_incorrect_test_images()
 
     def set_batch_test_loss(self, loss):
-        self.batch_test_loss += loss
+        self.batch_test_loss = loss
 
     def set_batch_test_accuracy(self, accuracy):
-        self.batch_test_accuracy += accuracy
+        self.batch_test_accuracy = accuracy
 
     # Maybe create a class for batch test data and for train test data?  To simplify complexity
     # of language and it'll simplify classes, too..
     def add_batch_test_confusion_data(self, predictions, labels):
-        if self.batch_test_predictions is None:
-            self.batch_test_predictions = predictions.cpu().numpy()
-            self.batch_test_labels = labels.cpu().numpy()
-        else:
-            self.batch_test_predictions = numpy.append(self.batch_test_predictions, predictions.cpu().numpy())
-            self.batch_test_labels = numpy.append(self.batch_test_labels, labels.cpu().numpy())
+        self.batch_test_predictions = predictions.cpu().numpy()
+        self.batch_test_labels = labels.cpu().numpy()
 
     def _add_confusion_matrix(self):
         import sklearn.metrics
@@ -161,21 +143,18 @@ class TenserBoardReport:
         return figure
                 
     def add_text (self, tag, text):
-        if not self.writer: return
         text = self._convert_text_to_markdown(str(text))
         self.writer.add_text(tag, text)
 
     def _convert_text_to_markdown(self, text):
         return text.replace("\n", "  \n")
 
-    def add_incorrect_test_images(self, correct_flags, images):
+    def add_incorrect_test_images(self, incorrect_flags, images):
         if (self.incorrect_test_images is not None and 
             len(self.incorrect_test_images) > self.max_num_incorrect_images): 
             return
 
-        incorrect_flags = correct_flags.logical_not()
         incorrect_images = images[incorrect_flags]
-
         if self.incorrect_test_images is None:
             self.incorrect_test_images = incorrect_images
         else:

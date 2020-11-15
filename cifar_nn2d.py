@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch import optim
 from torch.nn.modules import loss
+from torch.nn.modules.batchnorm import BatchNorm2d
 import torch.utils.data
 
 sys.path.append(os.path.dirname(__file__))
@@ -18,32 +19,81 @@ import numpy as np
 
 from tensorboardreport import TenserBoardReport
 
+class Conv3ResidualBlock (nn.Sequential):
+    def __init__ (self, in_channels, out_channels, stride, repeat):
+        assert out_channels % 4 == 0
+
+        super().__init__()
+
+        self._downsample = None
+        self._out_channels = out_channels
+        if stride != 1 or in_channels != out_channels:
+            self._downsample = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1 , stride=stride),
+                nn.BatchNorm2d(out_channels)
+            )
+
+        intermediate = out_channels // 4
+        self.resblocks = nn.ModuleList()
+        for _ in range(repeat):
+            self.resblocks.append (nn.Sequential(
+                nn.Conv2d (in_channels, intermediate, kernel_size=1, stride=1, padding=0),
+                nn.BatchNorm2d(intermediate),
+                nn.ReLU(),
+                nn.Conv2d (intermediate, intermediate, kernel_size=3, stride=stride, padding=1),
+                nn.BatchNorm2d(intermediate),
+                nn.ReLU(),
+                nn.Conv2d (intermediate, out_channels, kernel_size=1, stride=1, padding=0),
+                nn.BatchNorm2d(out_channels),
+            ))
+
+            # Only first layer uses in_channels defined by user.  Others follow the last out
+            in_channels = out_channels
+            # Same with stride - only first first block in 'repeat'
+            stride = 1
+
+        self.relu = nn.ReLU()
+
+    def forward (self, x):
+        identity = self._downsample(x) if self._downsample else x
+
+        for resblock in self.resblocks:
+            x = resblock(x)
+            x += identity
+            x = self.relu(x) 
+        return x
+
+
 class ObjectNN(nn.Module):
     def __init__ (self):
         super().__init__()
 
-        self.conv = nn.Sequential(
-            nn.Conv2d (3, 32, 4),
-            nn.BatchNorm2d (32),
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d (32, 64, 4),
-            nn.BatchNorm2d (64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
         )
 
-        self.linear = nn.Sequential(
-            nn.Linear(64*5*5, 640),
-            nn.ReLU(),
-            nn.Linear(640, 320),
-            nn.ReLU(),
-            nn.Linear(320, 10)
-        )
+        self.resnet_layer1 = Conv3ResidualBlock(64, 256, stride=1, repeat=3)
+        self.resnet_layer2 = Conv3ResidualBlock(256, 512, stride=2, repeat=4)
+        self.resnet_layer3 = Conv3ResidualBlock(512, 1024, stride=2, repeat=6)
+        self.resnet_layer4 = Conv3ResidualBlock(1024, 2048, stride=2, repeat=3)
+
+        #self.avg_pool = nn.AvgPool2d(7, stride=2)
+        #self.dropout = nn.Dropout2d(p=.5, inplace=True)
+
+        self.linear = nn.Linear(2048, 10)
 
     def forward (self, x):
-        x = self.conv(x)
-        x = x.view (x.size(0), -1)
+        x = self.conv1(x)
+        x = self.resnet_layer1(x)
+        x = self.resnet_layer2(x)
+        x = self.resnet_layer3(x)
+        x = self.resnet_layer4(x)
+        #x = self.avg_pool(x)
+
+        x = x.view(x.size(0), -1)
         x = self.linear(x)
         return x
 
